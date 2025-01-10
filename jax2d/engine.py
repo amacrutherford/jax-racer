@@ -1162,3 +1162,26 @@ def create_empty_sim(
     state = recalculate_mass_and_inertia(state, static_sim_params, polygon_densities, circle_densities)
 
     return state
+
+def create_empty_car_sim(
+        static_sim_params,
+        add_floor=True,
+        add_walls_and_ceiling=True,
+        scene_size=5,
+        floor_offset=0.2,
+    ) -> SimState:
+    """ create empty sim with 0 gravity """
+
+    state = create_empty_sim(
+        static_sim_params,
+        add_floor=add_floor,
+        add_walls_and_ceiling=add_walls_and_ceiling,
+        scene_size=scene_size,
+        floor_offset=floor_offset,
+    )
+
+    state = state.replace(
+        gravity=jnp.array([0.0,  0.0]),
+    )
+
+    return state
