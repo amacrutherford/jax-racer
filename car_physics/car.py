@@ -203,10 +203,8 @@ def main():
 
     # Car racing fns
     @jax.jit
-    def _apply_wheel_impulse(sim_state, w_index, dir):
+    def _apply_wheel_impulse(sim_state, w_index):
         wheel_omega = sim_state.polygon.radius[w_index]
-
-        wheel_omega += dir * 0.4
 
         w_rot = sim_state.polygon.rotation[w_index]
         w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
@@ -366,18 +364,40 @@ def main():
         sim_state = _clip_wheel_rotation(sim_state, w3_index, w3_j_index)
 
         # Apply wheel impulses
-        acc = 0.0
-
         if pygame.key.get_pressed()[pygame.K_w]:
-            acc += 1.0
+            d_omega = 0.4
+
+            sim_state = sim_state.replace(
+                polygon=sim_state.polygon.replace(
+                    radius=sim_state.polygon.radius.at[w1_index].add(d_omega).at[w2_index].add(d_omega)
+                )
+            )
+
+        def _apply_brake(sim_state, w_index):
+            wheel_omega = sim_state.polygon.radius[w_index]
+
+            braking_coeff = 0.1
+            braking_d_omega = -jnp.sign(wheel_omega) * braking_coeff
+            braking_d_omega = jax.lax.select(
+                jnp.abs(braking_d_omega) > jnp.abs(wheel_omega), -wheel_omega, braking_d_omega
+            )
+
+            sim_state = sim_state.replace(
+                polygon=sim_state.polygon.replace(radius=sim_state.polygon.radius.at[w_index].add(braking_d_omega))
+            )
+
+            return sim_state
 
         if pygame.key.get_pressed()[pygame.K_s]:
-            acc -= 1.0
+            sim_state = _apply_brake(sim_state, w0_index)
+            sim_state = _apply_brake(sim_state, w1_index)
+            sim_state = _apply_brake(sim_state, w2_index)
+            sim_state = _apply_brake(sim_state, w3_index)
 
-        sim_state = _apply_wheel_impulse(sim_state, w0_index, 0)
-        sim_state = _apply_wheel_impulse(sim_state, w1_index, acc)
-        sim_state = _apply_wheel_impulse(sim_state, w2_index, acc)
-        sim_state = _apply_wheel_impulse(sim_state, w3_index, 0)
+        sim_state = _apply_wheel_impulse(sim_state, w0_index)
+        sim_state = _apply_wheel_impulse(sim_state, w1_index)
+        sim_state = _apply_wheel_impulse(sim_state, w2_index)
+        sim_state = _apply_wheel_impulse(sim_state, w3_index)
 
         # Cancel out lateral wheel movement
         sim_state = apply_wheel_lateral_impulse(sim_state, w0_index)
