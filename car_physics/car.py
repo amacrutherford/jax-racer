@@ -35,7 +35,8 @@ def make_render_pixels(static_sim_params, screen_dim):
     def _world_space_to_pixel_space(x):
         return x * ppud + screen_padding
 
-    cleared_screen = clear_screen(full_screen_size, jnp.zeros(3))
+    clear_colour = jnp.array([19.0, 133.0, 16.0])
+    cleared_screen = clear_screen(full_screen_size, clear_colour)
 
     circle_shader = add_mask_to_shader(fragment_shader_circle)
     circle_renderer = make_renderer(full_screen_size, circle_shader, (patch_size, patch_size), batched=True)
@@ -61,7 +62,9 @@ def make_render_pixels(static_sim_params, screen_dim):
         rect_patch_positions = (rect_positions_pixel_space - (patch_size / 2)).astype(jnp.int32)
         rect_patch_positions = jnp.maximum(rect_patch_positions, 0)
 
-        rect_colours = jnp.ones((static_sim_params.num_polygons, 3)) * 128.0
+        rect_colours = jnp.zeros((static_sim_params.num_polygons, 3))
+        rect_colours = rect_colours.at[4, 0].set(255.0)
+
         rect_uniforms = (
             rectangle_vertices_pixel_space,
             rect_colours,
@@ -105,56 +108,84 @@ def main():
 
     # Create scene
     sim_state = create_empty_sim(static_sim_params, floor_offset=0.0)
+    sim_state = sim_state.replace(gravity=jnp.zeros(2))
 
     # Create a rectangle for the car body
+    car_dims = jnp.array([0.15, 0.3])
+    car_half_dims = car_dims / 2.0
+    car_pos = jnp.array([2.5, 2.5])
+
     sim_state, (_, r_index) = add_rectangle_to_scene(
-        sim_state, static_sim_params, position=jnp.array([2.0, 1.0]), dimensions=jnp.array([1.0, 0.4])
+        sim_state, static_sim_params, position=car_pos, dimensions=car_dims
+    )
+
+    # Create the wheels
+    wheel_dims = jnp.array([0.04, 0.08])
+
+    sim_state, (_, w0_index) = add_rectangle_to_scene(
+        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([1.0, 1.0]), dimensions=wheel_dims
+    )
+
+    sim_state, (_, w1_index) = add_rectangle_to_scene(
+        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([1.0, -1.0]), dimensions=wheel_dims
+    )
+
+    sim_state, (_, w2_index) = add_rectangle_to_scene(
+        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([-1.0, -1.0]), dimensions=wheel_dims
+    )
+
+    sim_state, (_, w3_index) = add_rectangle_to_scene(
+        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([-1.0, 1.0]), dimensions=wheel_dims
     )
 
     # Create circles for the wheels of the car
-    sim_state, (_, c1_index) = add_circle_to_scene(
-        sim_state, static_sim_params, position=jnp.array([1.5, 1.0]), radius=0.35
-    )
-    sim_state, (_, c2_index) = add_circle_to_scene(
-        sim_state, static_sim_params, position=jnp.array([2.5, 1.0]), radius=0.35
-    )
-
-    # Join the wheels to the car body with revolute joints
-    # Relative positions are from the centre of masses of each object
+    # sim_state, (_, c1_index) = add_circle_to_scene(
+    #     sim_state, static_sim_params, position=jnp.array([1.5, 1.0]), radius=0.35
+    # )
+    # sim_state, (_, c2_index) = add_circle_to_scene(
+    #     sim_state, static_sim_params, position=jnp.array([2.5, 1.0]), radius=0.35
+    # )
+    #
+    # # Join the wheels to the car body with revolute joints
+    # # Relative positions are from the centre of masses of each object
     sim_state, _ = add_revolute_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
-        b_index=c1_index,
-        a_relative_pos=jnp.array([-0.5, 0.0]),
+        b_index=w0_index,
+        a_relative_pos=car_half_dims * jnp.array([1.0, 1.0]),
         b_relative_pos=jnp.zeros(2),
-        motor_on=True,
+        motor_on=False,
     )
+
     sim_state, _ = add_revolute_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
-        b_index=c2_index,
-        a_relative_pos=jnp.array([0.5, 0.0]),
+        b_index=w1_index,
+        a_relative_pos=car_half_dims * jnp.array([1.0, -1.0]),
         b_relative_pos=jnp.zeros(2),
-        motor_on=True,
+        motor_on=False,
     )
 
-    # Add a triangle for a ramp - we fixate the ramp so it can't move
-    triangle_vertices = jnp.array(
-        [
-            [0.5, 0.1],
-            [0.5, -0.1],
-            [-0.5, -0.1],
-        ]
-    )
-    sim_state, (_, t1) = add_polygon_to_scene(
+    sim_state, _ = add_revolute_joint_to_scene(
         sim_state,
         static_sim_params,
-        position=jnp.array([2.7, 0.1]),
-        vertices=triangle_vertices,
-        n_vertices=3,
-        fixated=True,
+        a_index=r_index,
+        b_index=w2_index,
+        a_relative_pos=car_half_dims * jnp.array([-1.0, -1.0]),
+        b_relative_pos=jnp.zeros(2),
+        motor_on=False,
+    )
+
+    sim_state, _ = add_revolute_joint_to_scene(
+        sim_state,
+        static_sim_params,
+        a_index=r_index,
+        b_index=w3_index,
+        a_relative_pos=car_half_dims * jnp.array([-1.0, 1.0]),
+        b_relative_pos=jnp.zeros(2),
+        motor_on=False,
     )
 
     # Renderer
