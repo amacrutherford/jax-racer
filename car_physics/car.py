@@ -215,8 +215,10 @@ def main():
 
         df = wheel_speed_at_ground - ground_speed_along_normal
 
+        # How quick does the wheel catch up to the ground speed
         wheel_omega -= df * 0.6
 
+        # How much does ground speed catch up with the wheel
         friction_wheel_floor = 1.0
         dv = df * friction_wheel_floor * w_normal
 
@@ -228,34 +230,6 @@ def main():
         )
 
         return sim_state
-
-        # max_forward_speed = 3.0
-        # max_backward_speed = max_forward_speed / 3.0
-        # drive_speed = 1.0
-        #
-        # w_rot = sim_state.polygon.rotation[w_index]
-        # w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
-        # w_dv = w_normal * dir * drive_speed
-        #
-        # current_v = sim_state.polygon.velocity[w_index]
-        # w_speed_along_normal = jnp.dot(current_v, w_normal)
-        # new_velocity = current_v + w_dv
-        #
-        # can_apply = ((dir > 0) & (w_speed_along_normal < max_forward_speed)) | (
-        #     (dir < 0) & (w_speed_along_normal > -max_backward_speed)
-        # )
-        #
-        # new_velocity = jax.lax.select(
-        #     can_apply,
-        #     new_velocity,
-        #     current_v,
-        # )
-        #
-        # sim_state = sim_state.replace(
-        #     polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].set(new_velocity))
-        # )
-        #
-        # return sim_state
 
     @jax.jit
     def apply_wheel_lateral_impulse(sim_state, w_index):
