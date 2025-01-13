@@ -159,7 +159,7 @@ def main():
 
     # # Join the wheels to the car body with revolute joints
     # # Relative positions are from the centre of masses of each object
-    sim_state, _ = add_fixed_joint_to_scene(
+    sim_state, w0_j_index = add_fixed_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
@@ -168,7 +168,7 @@ def main():
         b_relative_pos=jnp.zeros(2),
     )
 
-    sim_state, _ = add_fixed_joint_to_scene(
+    sim_state, w1_j_index = add_fixed_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
@@ -177,7 +177,7 @@ def main():
         b_relative_pos=jnp.zeros(2),
     )
 
-    sim_state, _ = add_fixed_joint_to_scene(
+    sim_state, w2_j_index = add_fixed_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
@@ -186,7 +186,7 @@ def main():
         b_relative_pos=jnp.zeros(2),
     )
 
-    sim_state, _ = add_fixed_joint_to_scene(
+    sim_state, w3_j_index = add_fixed_joint_to_scene(
         sim_state,
         static_sim_params,
         a_index=r_index,
@@ -267,12 +267,10 @@ def main():
             polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
         )
 
-        # print(w_dv)
-
         return sim_state
 
     @jax.jit
-    def _clip_wheel_rotation(sim_state, w_index):
+    def _clip_wheel_rotation(sim_state, w_index, j_index):
         w_rotation = sim_state.polygon.rotation[w_index]
         car_rotation = sim_state.polygon.rotation[r_index]
 
@@ -282,7 +280,8 @@ def main():
         # clipped_rotation = w_rotation
 
         sim_state = sim_state.replace(
-            polygon=sim_state.polygon.replace(rotation=sim_state.polygon.rotation.at[w_index].set(clipped_rotation))
+            polygon=sim_state.polygon.replace(rotation=sim_state.polygon.rotation.at[w_index].set(clipped_rotation)),
+            joint=sim_state.joint.replace(rotation=sim_state.joint.rotation.at[j_index].set(clipped_relative_rotation)),
         )
 
         return sim_state
@@ -290,39 +289,41 @@ def main():
     pygame.init()
     screen_surface = pygame.display.set_mode(screen_dim)
 
+    wheel_avs = jnp.zeros(4)
+
     while True:
         actions = -jnp.ones(static_sim_params.num_joints + static_sim_params.num_thrusters)
         sim_state, _ = step_fn(sim_state, sim_params, actions)
 
         # Take action
-        wheel_rotate_speed = 0.05
+        wheel_steer_speed = 0.05
         if pygame.key.get_pressed()[pygame.K_a]:
             sim_state = sim_state.replace(
                 polygon=sim_state.polygon.replace(
-                    rotation=sim_state.polygon.rotation.at[w0_index].add(wheel_rotate_speed)
+                    rotation=sim_state.polygon.rotation.at[w0_index].add(wheel_steer_speed)
                 )
             )
             sim_state = sim_state.replace(
                 polygon=sim_state.polygon.replace(
-                    rotation=sim_state.polygon.rotation.at[w3_index].add(wheel_rotate_speed)
+                    rotation=sim_state.polygon.rotation.at[w3_index].add(wheel_steer_speed)
                 )
             )
 
         if pygame.key.get_pressed()[pygame.K_d]:
             sim_state = sim_state.replace(
                 polygon=sim_state.polygon.replace(
-                    rotation=sim_state.polygon.rotation.at[w0_index].add(-wheel_rotate_speed)
+                    rotation=sim_state.polygon.rotation.at[w0_index].add(-wheel_steer_speed)
                 )
             )
             sim_state = sim_state.replace(
                 polygon=sim_state.polygon.replace(
-                    rotation=sim_state.polygon.rotation.at[w3_index].add(-wheel_rotate_speed)
+                    rotation=sim_state.polygon.rotation.at[w3_index].add(-wheel_steer_speed)
                 )
             )
 
         # Cap wheel rotations
-        sim_state = _clip_wheel_rotation(sim_state, w0_index)
-        sim_state = _clip_wheel_rotation(sim_state, w3_index)
+        sim_state = _clip_wheel_rotation(sim_state, w0_index, w0_j_index)
+        sim_state = _clip_wheel_rotation(sim_state, w3_index, w3_j_index)
 
         if pygame.key.get_pressed()[pygame.K_w]:
             sim_state = _apply_wheel_impulse(sim_state, w1_index, 1.0)
