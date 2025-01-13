@@ -10,6 +10,7 @@ from jaxgl.shaders import (
     make_fragment_shader_convex_dynamic_ngon_with_edges,
 )
 
+from jax2d.collision import resolve_collision
 from jax2d.engine import PhysicsEngine, create_empty_sim
 from jax2d.maths import rmat
 from jax2d.scene import (
@@ -20,7 +21,7 @@ from jax2d.scene import (
     add_thruster_to_scene,
     add_polygon_to_scene,
 )
-from jax2d.sim_state import StaticSimParams, SimParams, SimState
+from jax2d.sim_state import StaticSimParams, SimParams, SimState, CollisionManifold
 
 
 def make_render_pixels(static_sim_params, screen_dim):
@@ -125,19 +126,35 @@ def main():
     wheel_dims = jnp.array([0.04, 0.08])
 
     sim_state, (_, w0_index) = add_rectangle_to_scene(
-        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([1.0, 1.0]), dimensions=wheel_dims
+        sim_state,
+        static_sim_params,
+        position=car_pos + car_half_dims * jnp.array([1.0, 1.0]),
+        dimensions=wheel_dims,
+        friction=0.0,
     )
 
     sim_state, (_, w1_index) = add_rectangle_to_scene(
-        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([1.0, -1.0]), dimensions=wheel_dims
+        sim_state,
+        static_sim_params,
+        position=car_pos + car_half_dims * jnp.array([1.0, -1.0]),
+        dimensions=wheel_dims,
+        friction=0.0,
     )
 
     sim_state, (_, w2_index) = add_rectangle_to_scene(
-        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([-1.0, -1.0]), dimensions=wheel_dims
+        sim_state,
+        static_sim_params,
+        position=car_pos + car_half_dims * jnp.array([-1.0, -1.0]),
+        dimensions=wheel_dims,
+        friction=0.0,
     )
 
     sim_state, (_, w3_index) = add_rectangle_to_scene(
-        sim_state, static_sim_params, position=car_pos + car_half_dims * jnp.array([-1.0, 1.0]), dimensions=wheel_dims
+        sim_state,
+        static_sim_params,
+        position=car_pos + car_half_dims * jnp.array([-1.0, 1.0]),
+        dimensions=wheel_dims,
+        friction=0.0,
     )
 
     # # Join the wheels to the car body with revolute joints
@@ -184,6 +201,74 @@ def main():
     # Step scene
     step_fn = jax.jit(engine.step)
 
+    # Car racing fns
+
+    @jax.jit
+    def _apply_wheel_impulse(sim_state, w_index, dir):
+        w_rot = sim_state.polygon.rotation[w_index]
+        w_dv = (
+            jnp.array(
+                [
+                    -jnp.sin(w_rot),
+                    jnp.cos(w_rot),
+                ]
+            )
+            * dir
+        )
+
+        sim_state = sim_state.replace(
+            polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
+        )
+
+        return sim_state
+
+    @jax.jit
+    def apply_wheel_lateral_impulse(sim_state, w_index):
+        w_lateral_rot = sim_state.polygon.rotation[w_index] + jnp.pi / 2.0
+        w_vel = sim_state.polygon.velocity[w_index]
+        w_lateral_normal = jnp.array([-jnp.sin(w_lateral_rot), jnp.cos(w_lateral_rot)])
+
+        sign = jnp.sign(jnp.dot(w_vel, w_lateral_normal))
+
+        collision_manifold = CollisionManifold(
+            normal=w_lateral_normal * sign,
+            penetration=0.0,
+            collision_point=sim_state.polygon.position[w_index],
+            active=True,
+            acc_impulse_normal=0.0,
+            acc_impulse_tangent=0.0,
+            restitution_velocity_target=0.0,
+        )
+
+        wheel = jax.tree.map(lambda x: x[w_index], sim_state.polygon)
+        floor = jax.tree.map(lambda x: x[0], sim_state.polygon)
+
+        w_dv, _, _, _, _, _ = resolve_collision(
+            wheel, floor, collision_manifold, does_collide=True, sim_params=sim_params
+        )
+
+        sim_state = sim_state.replace(
+            polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
+        )
+
+        return sim_state
+
+    @jax.jit
+    def _clip_wheel_rotation(sim_state, w_index):
+        w_rotation = sim_state.polygon.rotation[w_index]
+        car_rotation = sim_state.polygon.rotation[r_index]
+
+        relative_rotation = w_rotation - car_rotation
+        clipped_relative_rotation = jnp.clip(relative_rotation, -jnp.pi / 4, jnp.pi / 4)
+        clipped_rotation = car_rotation + clipped_relative_rotation
+        # clipped_rotation = w_rotation
+
+        sim_state = sim_state.replace(
+            polygon=sim_state.polygon.replace(rotation=sim_state.polygon.rotation.at[w_index].set(clipped_rotation))
+        )
+
+        return sim_state
+
     pygame.init()
     screen_surface = pygame.display.set_mode(screen_dim)
 
@@ -217,31 +302,23 @@ def main():
                 )
             )
 
-        def _apply_wheel_impulse(sim_state, w_index, dir):
-            w_rot = sim_state.polygon.rotation[w_index]
-            w_dv = (
-                jnp.array(
-                    [
-                        -jnp.sin(w_rot),
-                        jnp.cos(w_rot),
-                    ]
-                )
-                * dir
-            )
-
-            sim_state = sim_state.replace(
-                polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
-            )
-
-            return sim_state
+        # Cap wheel rotations
+        sim_state = _clip_wheel_rotation(sim_state, w0_index)
+        sim_state = _clip_wheel_rotation(sim_state, w3_index)
 
         if pygame.key.get_pressed()[pygame.K_w]:
-            sim_state = _apply_wheel_impulse(sim_state, w0_index, 1.0)
-            sim_state = _apply_wheel_impulse(sim_state, w3_index, 1.0)
+            sim_state = _apply_wheel_impulse(sim_state, w1_index, 1.0)
+            sim_state = _apply_wheel_impulse(sim_state, w2_index, 1.0)
 
         if pygame.key.get_pressed()[pygame.K_s]:
-            sim_state = _apply_wheel_impulse(sim_state, w0_index, -1.0)
-            sim_state = _apply_wheel_impulse(sim_state, w3_index, -1.0)
+            sim_state = _apply_wheel_impulse(sim_state, w1_index, -1.0)
+            sim_state = _apply_wheel_impulse(sim_state, w2_index, -1.0)
+
+        # Cancel out lateral movement
+        sim_state = apply_wheel_lateral_impulse(sim_state, w0_index)
+        sim_state = apply_wheel_lateral_impulse(sim_state, w1_index)
+        sim_state = apply_wheel_lateral_impulse(sim_state, w2_index)
+        sim_state = apply_wheel_lateral_impulse(sim_state, w3_index)
 
         # Render
         pixels = renderer(sim_state)
