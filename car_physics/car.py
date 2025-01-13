@@ -204,33 +204,58 @@ def main():
     # Car racing fns
     @jax.jit
     def _apply_wheel_impulse(sim_state, w_index, dir):
-        max_forward_speed = 3.0
-        max_backward_speed = max_forward_speed / 3.0
-        drive_speed = 1.0
+        wheel_omega = sim_state.polygon.radius[w_index]
+
+        wheel_omega += dir * 0.2
 
         w_rot = sim_state.polygon.rotation[w_index]
         w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
-        w_dv = w_normal * dir * drive_speed
+        ground_speed_along_normal = jnp.dot(w_normal, sim_state.polygon.velocity[w_index])
 
-        current_v = sim_state.polygon.velocity[w_index]
-        w_speed_along_normal = jnp.dot(current_v, w_normal)
-        new_velocity = current_v + w_dv
+        wheel_radius = 0.1
+        wheel_speed_at_ground = wheel_omega * wheel_radius
 
-        can_apply = ((dir > 0) & (w_speed_along_normal < max_forward_speed)) | (
-            (dir < 0) & (w_speed_along_normal > -max_backward_speed)
-        )
+        df = wheel_speed_at_ground - ground_speed_along_normal
 
-        new_velocity = jax.lax.select(
-            can_apply,
-            new_velocity,
-            current_v,
-        )
+        wheel_omega -= df * 0.3
+        dv = df * 1.0 * w_normal
 
         sim_state = sim_state.replace(
-            polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].set(new_velocity))
+            polygon=sim_state.polygon.replace(
+                radius=sim_state.polygon.radius.at[w_index].set(wheel_omega),
+                velocity=sim_state.polygon.velocity.at[w_index].add(dv),
+            )
         )
 
         return sim_state
+
+        # max_forward_speed = 3.0
+        # max_backward_speed = max_forward_speed / 3.0
+        # drive_speed = 1.0
+        #
+        # w_rot = sim_state.polygon.rotation[w_index]
+        # w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
+        # w_dv = w_normal * dir * drive_speed
+        #
+        # current_v = sim_state.polygon.velocity[w_index]
+        # w_speed_along_normal = jnp.dot(current_v, w_normal)
+        # new_velocity = current_v + w_dv
+        #
+        # can_apply = ((dir > 0) & (w_speed_along_normal < max_forward_speed)) | (
+        #     (dir < 0) & (w_speed_along_normal > -max_backward_speed)
+        # )
+        #
+        # new_velocity = jax.lax.select(
+        #     can_apply,
+        #     new_velocity,
+        #     current_v,
+        # )
+        #
+        # sim_state = sim_state.replace(
+        #     polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].set(new_velocity))
+        # )
+        #
+        # return sim_state
 
     @jax.jit
     def apply_wheel_lateral_impulse(sim_state, w_index):
@@ -258,7 +283,7 @@ def main():
             wheel, floor, collision_manifold, does_collide=True, sim_params=sim_params
         )
 
-        slippage_dv_mag = 0.5
+        slippage_dv_mag = 0.3
         w_dv_mag = jnp.linalg.norm(w_dv)
 
         w_dv = jax.lax.select(w_dv_mag <= slippage_dv_mag, w_dv, w_dv / w_dv_mag * slippage_dv_mag)
@@ -288,8 +313,6 @@ def main():
 
     pygame.init()
     screen_surface = pygame.display.set_mode(screen_dim)
-
-    wheel_avs = jnp.zeros(4)
 
     while True:
         actions = -jnp.ones(static_sim_params.num_joints + static_sim_params.num_thrusters)
@@ -325,13 +348,16 @@ def main():
         sim_state = _clip_wheel_rotation(sim_state, w0_index, w0_j_index)
         sim_state = _clip_wheel_rotation(sim_state, w3_index, w3_j_index)
 
+        acc = 0.0
+
         if pygame.key.get_pressed()[pygame.K_w]:
-            sim_state = _apply_wheel_impulse(sim_state, w1_index, 1.0)
-            sim_state = _apply_wheel_impulse(sim_state, w2_index, 1.0)
+            acc += 1.0
 
         if pygame.key.get_pressed()[pygame.K_s]:
-            sim_state = _apply_wheel_impulse(sim_state, w1_index, -1.0)
-            sim_state = _apply_wheel_impulse(sim_state, w2_index, -1.0)
+            acc -= 1.0
+
+        sim_state = _apply_wheel_impulse(sim_state, w1_index, acc)
+        sim_state = _apply_wheel_impulse(sim_state, w2_index, acc)
 
         # Cancel out lateral movement
         sim_state = apply_wheel_lateral_impulse(sim_state, w0_index)
