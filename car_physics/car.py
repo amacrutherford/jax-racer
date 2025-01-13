@@ -206,7 +206,7 @@ def main():
     def _apply_wheel_impulse(sim_state, w_index, dir):
         wheel_omega = sim_state.polygon.radius[w_index]
 
-        wheel_omega += dir * 0.2
+        wheel_omega += dir * 0.4
 
         w_rot = sim_state.polygon.rotation[w_index]
         w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
@@ -217,8 +217,10 @@ def main():
 
         df = wheel_speed_at_ground - ground_speed_along_normal
 
-        wheel_omega -= df * 0.3
-        dv = df * 1.0 * w_normal
+        wheel_omega -= df * 0.6
+
+        friction_wheel_floor = 1.0
+        dv = df * friction_wheel_floor * w_normal
 
         sim_state = sim_state.replace(
             polygon=sim_state.polygon.replace(
@@ -283,7 +285,7 @@ def main():
             wheel, floor, collision_manifold, does_collide=True, sim_params=sim_params
         )
 
-        slippage_dv_mag = 0.3
+        slippage_dv_mag = 0.5
         w_dv_mag = jnp.linalg.norm(w_dv)
 
         w_dv = jax.lax.select(w_dv_mag <= slippage_dv_mag, w_dv, w_dv / w_dv_mag * slippage_dv_mag)
@@ -302,7 +304,6 @@ def main():
         relative_rotation = w_rotation - car_rotation
         clipped_relative_rotation = jnp.clip(relative_rotation, -jnp.pi / 4, jnp.pi / 4)
         clipped_rotation = car_rotation + clipped_relative_rotation
-        # clipped_rotation = w_rotation
 
         sim_state = sim_state.replace(
             polygon=sim_state.polygon.replace(rotation=sim_state.polygon.rotation.at[w_index].set(clipped_rotation)),
@@ -315,6 +316,8 @@ def main():
     screen_surface = pygame.display.set_mode(screen_dim)
 
     while True:
+        # print(sim_state.polygon.radius[5:9]) # Wheel speeds
+
         actions = -jnp.ones(static_sim_params.num_joints + static_sim_params.num_thrusters)
         sim_state, _ = step_fn(sim_state, sim_params, actions)
 
@@ -332,7 +335,7 @@ def main():
                 )
             )
 
-        if pygame.key.get_pressed()[pygame.K_d]:
+        elif pygame.key.get_pressed()[pygame.K_d]:
             sim_state = sim_state.replace(
                 polygon=sim_state.polygon.replace(
                     rotation=sim_state.polygon.rotation.at[w0_index].add(-wheel_steer_speed)
@@ -343,11 +346,26 @@ def main():
                     rotation=sim_state.polygon.rotation.at[w3_index].add(-wheel_steer_speed)
                 )
             )
+        else:
+            r0 = sim_state.polygon.rotation[w0_index] - sim_state.polygon.rotation[r_index]
+            r0 *= 0.9
+            r0 = sim_state.polygon.rotation[r_index] + r0
+
+            r3 = sim_state.polygon.rotation[w3_index] - sim_state.polygon.rotation[r_index]
+            r3 *= 0.9
+            r3 = sim_state.polygon.rotation[r_index] + r3
+
+            sim_state = sim_state.replace(
+                polygon=sim_state.polygon.replace(
+                    rotation=sim_state.polygon.rotation.at[w0_index].set(r0).at[w3_index].set(r3)
+                )
+            )
 
         # Cap wheel rotations
         sim_state = _clip_wheel_rotation(sim_state, w0_index, w0_j_index)
         sim_state = _clip_wheel_rotation(sim_state, w3_index, w3_j_index)
 
+        # Apply wheel impulses
         acc = 0.0
 
         if pygame.key.get_pressed()[pygame.K_w]:
@@ -356,10 +374,12 @@ def main():
         if pygame.key.get_pressed()[pygame.K_s]:
             acc -= 1.0
 
+        sim_state = _apply_wheel_impulse(sim_state, w0_index, 0)
         sim_state = _apply_wheel_impulse(sim_state, w1_index, acc)
         sim_state = _apply_wheel_impulse(sim_state, w2_index, acc)
+        sim_state = _apply_wheel_impulse(sim_state, w3_index, 0)
 
-        # Cancel out lateral movement
+        # Cancel out lateral wheel movement
         sim_state = apply_wheel_lateral_impulse(sim_state, w0_index)
         sim_state = apply_wheel_lateral_impulse(sim_state, w1_index)
         sim_state = apply_wheel_lateral_impulse(sim_state, w2_index)
