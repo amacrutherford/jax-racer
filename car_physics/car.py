@@ -202,22 +202,32 @@ def main():
     step_fn = jax.jit(engine.step)
 
     # Car racing fns
-
     @jax.jit
     def _apply_wheel_impulse(sim_state, w_index, dir):
+        max_forward_speed = 3.0
+        max_backward_speed = max_forward_speed / 3.0
+        drive_speed = 1.0
+
         w_rot = sim_state.polygon.rotation[w_index]
-        w_dv = (
-            jnp.array(
-                [
-                    -jnp.sin(w_rot),
-                    jnp.cos(w_rot),
-                ]
-            )
-            * dir
+        w_normal = jnp.array([-jnp.sin(w_rot), jnp.cos(w_rot)])
+        w_dv = w_normal * dir * drive_speed
+
+        current_v = sim_state.polygon.velocity[w_index]
+        w_speed_along_normal = jnp.dot(current_v, w_normal)
+        new_velocity = current_v + w_dv
+
+        can_apply = ((dir > 0) & (w_speed_along_normal < max_forward_speed)) | (
+            (dir < 0) & (w_speed_along_normal > -max_backward_speed)
+        )
+
+        new_velocity = jax.lax.select(
+            can_apply,
+            new_velocity,
+            current_v,
         )
 
         sim_state = sim_state.replace(
-            polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
+            polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].set(new_velocity))
         )
 
         return sim_state
@@ -230,6 +240,7 @@ def main():
 
         sign = jnp.sign(jnp.dot(w_vel, w_lateral_normal))
 
+        # CBA to copy and paste collision code, so we simulate the lateral impulse as a 'collision' with the floor
         collision_manifold = CollisionManifold(
             normal=w_lateral_normal * sign,
             penetration=0.0,
@@ -247,9 +258,16 @@ def main():
             wheel, floor, collision_manifold, does_collide=True, sim_params=sim_params
         )
 
+        slippage_dv_mag = 0.5
+        w_dv_mag = jnp.linalg.norm(w_dv)
+
+        w_dv = jax.lax.select(w_dv_mag <= slippage_dv_mag, w_dv, w_dv / w_dv_mag * slippage_dv_mag)
+
         sim_state = sim_state.replace(
             polygon=sim_state.polygon.replace(velocity=sim_state.polygon.velocity.at[w_index].add(w_dv))
         )
+
+        # print(w_dv)
 
         return sim_state
 
