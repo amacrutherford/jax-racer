@@ -662,6 +662,26 @@ def get_pairwise_interaction_indices(static_sim_params: StaticSimParams):
 
     return ncc, ncr, nrr, circle_circle_pairs, circle_poly_pairs, poly_poly_pairs
 
+def get_poly_only_pairwise_interaction_indices(static_sim_params: StaticSimParams):
+    # Pre-compute collision pairs
+    # Polygon-Polygon
+    nrr = calc_nrr(static_sim_params)
+
+    poly_poly_pairs = jnp.zeros((nrr, 2), dtype=jnp.int32)
+
+    ci = 0
+    for r1 in range(static_sim_params.num_polygons):
+        for r2 in range(static_sim_params.num_polygons):
+            both_fixated = (
+                r1 < static_sim_params.num_static_fixated_polys and r2 < static_sim_params.num_static_fixated_polys
+            )
+            valid = (r1 < r2) and (not both_fixated)
+            new_val = valid * jnp.array([r1, r2]) + (1 - valid) * poly_poly_pairs[ci]
+            poly_poly_pairs = poly_poly_pairs.at[ci].set(new_val)
+            ci += 1 * valid
+
+    return nrr, poly_poly_pairs
+
 
 class PhysicsEngine:
     def __init__(self, static_sim_params: StaticSimParams):
@@ -755,8 +775,251 @@ class PhysicsEngine:
 
             m = generate_manifold_circle_circle(c1, c2, warm_start_manifold)
             return m
-
+        
         cc_manifolds = jax.vmap(_calc_cc_manifold)(self.circle_circle_pairs, jnp.arange(len(self.circle_circle_pairs)))
+        
+        return rr_manifolds, cr_manifolds, cc_manifolds
+
+    def step(self, state: SimState, params: SimParams, actions: jnp.ndarray):
+        chex.assert_shape(
+            actions,
+            (self.static_sim_params.num_joints + self.static_sim_params.num_thrusters,),
+        )
+        motor_actions = actions[: self.static_sim_params.num_joints]
+        thruster_actions = actions[self.static_sim_params.num_joints :]
+
+        # Apply gravity
+        state = state.replace(
+            polygon=state.polygon.replace(
+                velocity=state.polygon.velocity + state.gravity * params.dt * (state.polygon.inverse_mass != 0)[:, None]
+            ),
+            circle=state.circle.replace(
+                velocity=state.circle.velocity + state.gravity * params.dt * (state.circle.inverse_mass != 0)[:, None],
+            ),
+        )
+
+        rr_manifolds, cr_manifolds, cc_manifolds = self.calculate_collision_manifolds(state)
+
+        def _calc_motors(revolute_joint_index):
+            revolute_joint = jax.tree.map(lambda x: x[revolute_joint_index], state.joint)
+
+            r1 = select_shape(state, revolute_joint.a_index, self.static_sim_params)
+            r2 = select_shape(state, revolute_joint.b_index, self.static_sim_params)
+
+            a_drv, b_drv = apply_motor(r1, r2, revolute_joint, motor_actions[revolute_joint_index], params)
+            return (
+                revolute_joint.a_index,
+                revolute_joint.b_index,
+                a_drv,
+                b_drv,
+                revolute_joint.motor_speed * params.base_motor_speed * revolute_joint.motor_on
+                + (1 - revolute_joint.motor_on) * -1,
+            )
+
+        ai, bi, a_drv, b_drv, max_speed = jax.vmap(_calc_motors)(jnp.arange(self.static_sim_params.num_joints))
+
+        poly_ai = ai < self.static_sim_params.num_polygons
+        poly_bi = bi < self.static_sim_params.num_polygons
+
+        new_poly_angular_vel = state.polygon.angular_velocity.at[ai].add(a_drv * poly_ai)
+        new_poly_angular_vel = new_poly_angular_vel.at[bi].add(b_drv * poly_bi)
+
+        ai -= self.static_sim_params.num_polygons
+        bi -= self.static_sim_params.num_polygons
+
+        new_circle_angular_vel = state.circle.angular_velocity.at[ai].add(a_drv * jnp.logical_not(poly_ai))
+        new_circle_angular_vel = new_circle_angular_vel.at[bi].add(b_drv * jnp.logical_not(poly_bi))
+
+        state = state.replace(
+            polygon=state.polygon.replace(
+                angular_velocity=new_poly_angular_vel,
+            ),
+            circle=state.circle.replace(
+                angular_velocity=new_circle_angular_vel,
+            ),
+        )
+
+        # Thrusters
+        def calc_thrusters(state):
+            def calc_thruster(t_index):
+                thruster = jax.tree.map(lambda x: x[t_index], state.thruster)
+                parent_shape = select_shape(state, thruster.object_index, self.static_sim_params)
+
+                pos_after_transform = rmat(parent_shape.rotation) @ thruster.relative_position
+
+                rotation = thruster.rotation + parent_shape.rotation
+                dipolyion = jnp.array([jnp.cos(rotation), jnp.sin(rotation)])
+                force = (
+                    thruster.power
+                    * thruster.active
+                    * params.base_thruster_power
+                    * thruster_actions[t_index]
+                    * params.dt
+                )
+
+                drv = parent_shape.inverse_inertia * jnp.cross(pos_after_transform, dipolyion) * force
+                dv = parent_shape.inverse_mass * dipolyion * force
+                return thruster.object_index, drv, dv
+
+            ai, drv_i, dv_i = jax.vmap(calc_thruster)(jnp.arange(self.static_sim_params.num_thrusters))
+            is_poly = ai < self.static_sim_params.num_polygons
+
+            new_poly_angular_vel = state.polygon.angular_velocity.at[ai].add(drv_i * is_poly)
+            new_poly_vel = state.polygon.velocity.at[ai].add(dv_i * is_poly[:, None])
+            ai -= self.static_sim_params.num_polygons
+            new_circle_angular_vel = state.circle.angular_velocity.at[ai].add(drv_i * jnp.logical_not(is_poly))
+            new_circle_vel = state.circle.velocity.at[ai].add(dv_i * jnp.logical_not(is_poly[:, None]))
+
+            state = state.replace(
+                polygon=state.polygon.replace(
+                    angular_velocity=new_poly_angular_vel,
+                    velocity=new_poly_vel,
+                ),
+                circle=state.circle.replace(
+                    angular_velocity=new_circle_angular_vel,
+                    velocity=new_circle_vel,
+                ),
+            )
+            return state
+
+        state = calc_thrusters(state)
+
+        # Warm starting
+        if self.static_sim_params.do_warm_starting:
+            state = self.ws_rr_fn(state, rr_manifolds)
+            state = self.ws_cr_fn(state, cr_manifolds)
+            state = self.ws_cc_fn(state, cc_manifolds)
+            state = self.ws_j_fn(state)
+
+        # Main render loop
+        def _solver_iteration(carry, unused):
+            state, rr_manifolds, cr_manifolds, cc_manifolds = carry
+
+            # Joints
+            state = self.j_fn(state, params)
+
+            # Collisions
+            state, rr_manifolds = self.rr_fn(state, rr_manifolds, params)
+            state, cr_manifolds = self.cr_fn(state, cr_manifolds, params)
+            state, cc_manifolds = self.cc_fn(state, cc_manifolds, params)
+
+            return (state, rr_manifolds, cr_manifolds, cc_manifolds), None
+
+        (state, rr_manifolds, cr_manifolds, cc_manifolds), _ = jax.lax.scan(
+            _solver_iteration,
+            (state, rr_manifolds, cr_manifolds, cc_manifolds),
+            None,
+            length=self.static_sim_params.num_solver_iterations,
+        )
+
+        if self.static_sim_params.do_warm_starting:
+            state = state.replace(
+                acc_rr_manifolds=rr_manifolds,
+                acc_cr_manifolds=cr_manifolds,
+                acc_cc_manifolds=cc_manifolds,
+            )
+
+        # Euler step
+        state = state.replace(
+            polygon=state.polygon.replace(
+                position=state.polygon.position + state.polygon.velocity * params.dt,
+                rotation=(state.polygon.rotation + state.polygon.angular_velocity * params.dt),  # % (2 * jnp.pi),
+            ),
+            circle=state.circle.replace(
+                position=state.circle.position + state.circle.velocity * params.dt,
+                rotation=(state.circle.rotation + state.circle.angular_velocity * params.dt),  # % (2 * jnp.pi),
+            ),
+        )
+
+        # Clip fast/far objects
+        state = clip_state(state, params)
+
+        def _update_thruster_relative_pos(thruster):
+            parent_shape = select_shape(state, thruster.object_index, self.static_sim_params)
+            return thruster.replace(
+                global_position=parent_shape.position
+                + jnp.matmul(rmat(parent_shape.rotation), thruster.relative_position)
+            )
+
+        state = state.replace(thruster=jax.vmap(_update_thruster_relative_pos)(state.thruster))
+
+        return state, (
+            jax.tree.map(lambda x: x[:, 0], rr_manifolds),
+            cr_manifolds,
+            cc_manifolds,
+        )
+        
+class PolyOnlyPhysicsEngine:
+    def __init__(self, static_sim_params: StaticSimParams):
+        self.static_sim_params = static_sim_params
+        chex.assert_equal(static_sim_params.num_circles, 0)
+        (
+            nrr,
+            self.poly_poly_pairs,
+        ) = get_poly_only_pairwise_interaction_indices(static_sim_params)
+        batch_size = self.static_sim_params.solver_batch_size
+
+        nrr_b = jnp.ceil(nrr / batch_size).astype(int)
+
+        # Define the impulse resolution functions
+        self.rr_fn = make_impulse_resolver_fn(
+            static_sim_params,
+            True,
+            True,
+            nrr,
+            nrr_b,
+            batch_size,
+            nrr_b * batch_size,
+            self.poly_poly_pairs,
+        )
+
+        # Define the joint resolver functions
+        self.j_fn = make_joint_resolver_fn(self.static_sim_params.num_joints, self.static_sim_params)
+
+        # Define impulse warm starting functions
+        self.ws_rr_fn = make_impulse_warm_starting_fn(static_sim_params, True, True, nrr, self.poly_poly_pairs)
+
+        # Define joint warm starting functions
+        self.ws_j_fn = make_joint_warm_starting_fn(static_sim_params, static_sim_params.num_joints)
+
+    def calculate_collision_manifolds(self, state: SimState):
+        def _calc_rr_manifold(rr_indexes, m_index):
+            r1 = jax.tree.map(lambda x: x[rr_indexes[0]], state.polygon)
+            r2 = jax.tree.map(lambda x: x[rr_indexes[1]], state.polygon)
+
+            warm_start_manifold = jax.tree.map(lambda x: x[m_index], state.acc_rr_manifolds)
+
+            ms = generate_manifolds_polygon_polygon(r1, r2, warm_start_manifold)
+            return ms
+
+        rr_manifolds = jax.vmap(_calc_rr_manifold)(self.poly_poly_pairs, jnp.arange(len(self.poly_poly_pairs)))
+
+        def _calc_cr_manifold(cr_indexes, m_index):
+            c1 = jax.tree.map(lambda x: x[cr_indexes[0]], state.circle)
+            r1 = jax.tree.map(lambda x: x[cr_indexes[1]], state.polygon)
+
+            warm_start_manifold = jax.tree.map(lambda x: x[m_index], state.acc_cr_manifolds)
+
+            m = generate_manifold_circle_polygon(c1, r1, warm_start_manifold)
+            return m
+
+        if self.static_sim_params.num_circles > 0:
+            cr_manifolds = jax.vmap(_calc_cr_manifold)(self.circle_poly_pairs, jnp.arange(len(self.circle_poly_pairs)))
+        else:
+            cr_manifolds = None
+
+        def _calc_cc_manifold(cc_indexes, m_index):
+            c1 = jax.tree.map(lambda x: x[cc_indexes[0]], state.circle)
+            c2 = jax.tree.map(lambda x: x[cc_indexes[1]], state.circle)
+
+            warm_start_manifold = jax.tree.map(lambda x: x[m_index], state.acc_cc_manifolds)
+
+            m = generate_manifold_circle_circle(c1, c2, warm_start_manifold)
+            return m
+        if self.static_sim_params.num_circles > 0:
+            cc_manifolds = jax.vmap(_calc_cc_manifold)(self.circle_circle_pairs, jnp.arange(len(self.circle_circle_pairs)))
+        else:
+            cc_manifolds = None
 
         return rr_manifolds, cr_manifolds, cc_manifolds
 

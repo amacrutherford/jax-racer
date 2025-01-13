@@ -111,7 +111,7 @@ def get_random_points_fixed(rng, n: int, max_n: int, mindst: float = 0.1, scale=
         # sort points in ccw order
         mean_a = jnp.mean(a, axis=0, where=valid[:, None])
         d = a - mean_a
-        s = jnp.arctan2(d[:, 0], d[:, 1]) + large_offset
+        s = jnp.arctan2(d[:, 1], d[:, 0]) + large_offset
         order = jnp.argsort(s)
         a = a.at[order].get()
 
