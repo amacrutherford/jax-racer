@@ -57,6 +57,11 @@ def ccw_sort(p):
     s = np.arctan2(d[:, 0], d[:, 1])
     return p[np.argsort(s), :]
 
+def cw_sort(p: jnp.ndarray) -> jnp.ndarray:
+    d = p - np.mean(p, axis=0)
+    s = np.arctan2(d[:, 0], d[:, 1])
+    return p[-np.argsort(s), :]
+
 
 def get_bezier_curve(a=None, rad=0.2, edgy=0, **kw):
     """Given an array of points *a*, create a curve through
